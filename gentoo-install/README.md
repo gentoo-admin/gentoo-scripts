@@ -18,3 +18,4 @@ Issues.
 A couple of things were found during previous installations:
 -- UUID on target partitions can be randomly changed during base system install (so Gentoo script recreates partitions or just replaces UUIDs on them?) - in this case newly installed os will not be able to mount all partitions upon first boot and display an error message. This will happen because /etc/fstab is configured with the UUIDs instead of device name, as suggested in the Gentoo handbook. If the error is displayed, run the script ./fstab-fix.sh before proceeeding to the next step.
 -- sometimes package integrity is broken at the Gentoo repository, so packages can progressively compile, but eventually fail. This specifically applies for the case when the gentoo repository going through KDE upgrade. If this is the case, wait and run the KDE desktop script sometime (like a day) later.
+
