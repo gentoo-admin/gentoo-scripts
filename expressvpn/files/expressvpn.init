@@ -1,0 +1,124 @@
+#!/sbin/openrc-run
+# OpenRC script to start expressvpn 
+
+DESC="ExpressVPN service"
+NAME=expressvpnd
+DAEMON=/usr/sbin/$NAME
+DAEMON_ARGS=(--client-version "1.4.1" --client-build "2966")
+PIDFILE=/var/run/$NAME.pid
+SCRIPTNAME=/etc/init.d/expressvpn
+
+# Exit if the package is not installed
+[ -x "$DAEMON" ] || exit 5
+
+# Read configuration variable file if it is present
+[ -r /etc/default/$NAME ] && . /etc/default/$NAME
+
+STDOUT=${STDOUT:-"/dev/null"}
+STDERR=${STDERR:-"/dev/null"}
+
+# Load the VERBOSE setting and other rcS variables
+[ -f /lib/init/vars.sh ] && . /lib/init/vars.sh
+
+depend() {
+  need net
+  use logger dns
+}
+
+function killproc() {
+    if [ $# -ne 3 ]; then
+        eerror "Expected three arguments, e.g. $0 -p pidfile signal"
+    fi
+
+    local PID
+    PID=$(cat "$2")
+
+    /bin/kill -s "$3" "$PID"
+    while true; do
+        if pidof "$(basename "$DAEMON")" >/dev/null ; then
+            return 0
+        fi
+
+        sleep 1
+        n=$(( "$n" + 1 ))
+        if [ "$n" -eq 30 ]; then
+            /bin/kill -s SIGKILL "$PID"
+            return 0
+        fi
+    done
+}
+
+#
+# Function that starts the daemon/service
+#
+start()
+{
+    # Return
+    #   0 if daemon has been started
+    #   1 if daemon was already running
+    #   2 if daemon could not be started
+    ebegin "Starting expressvpn"
+    if command -v start-stop-daemon > /dev/null 2>&1; then
+        nohup start-stop-daemon --start --quiet -m --pidfile "$PIDFILE" --exec "$DAEMON" -- "${DAEMON_ARGS[@]}" >>"$STDOUT" 2>>"$STDERR" &
+    else
+        su -s /bin/sh -c "nohup $DAEMON -pidfile $PIDFILE ${DAEMON_ARGS[*]} >>$STDOUT 2>>$STDERR &"
+    fi
+
+    # Add code here, if necessary, that waits for the process to be ready
+    # to handle requests from services started subsequently which depend
+    # on this one.  As a last resort, sleep for some time.
+    sleep 1
+
+    if /usr/bin/expressvpn status > /dev/null 2>&1; then
+        eend 0
+    else
+        eend 2
+    fi
+
+}
+
+#
+# Function that stops the daemon/service
+#
+stop()
+{
+    # Return
+    #   0 if daemon has been stopped
+    #   1 if daemon was already stopped
+    #   2 if daemon could not be stopped
+    #   other if a failure occurred
+    ebegin "Stopping expressvpn"
+    if command -v start-stop-daemon > /dev/null 2>&1; then
+        start-stop-daemon --stop --quiet --retry=TERM/30/KILL/5 --pidfile "$PIDFILE" --name "$NAME"
+
+        RETVAL="$?"
+        [ "$RETVAL" = 2 ] && return 2
+        # Wait for children to finish too if this is a daemon that forks
+        # and if the daemon is only ever run from this initscript.
+        # If the above conditions are not satisfied then add some other code
+        # that waits for the process to drop all resources that could be
+        # needed by services started subsequently.  A last resort is to
+        # sleep for some time.
+        start-stop-daemon --stop --quiet --oknodo --retry=0/30/KILL/5 --exec $DAEMON
+        [ "$?" = 2 ] && return 2
+        # Many daemons don't delete their pidfiles when they exit.
+        rm -f "$PIDFILE"
+        eend "$RETVAL"
+    else
+        # Stop the daemon.
+        if [ -e "$PIDFILE" ]; then
+            local PID
+            PID="$(pgrep -f "$PIDFILE")"
+            if test ! -z "$PID" && kill -0 "$PID" &>/dev/null; then
+                if killproc -p "$PIDFILE" SIGTERM && /bin/rm -rf "$PIDFILE"; then
+                    eend 0
+                else
+                    eend 2
+                fi
+            fi
+        else
+            eend 1
+        fi
+    fi
+}
+

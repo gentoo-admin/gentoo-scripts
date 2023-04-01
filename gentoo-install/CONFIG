@@ -1,0 +1,42 @@
+#!/bin/bash
+# source file where global config params is saved
+# to avoid collision all variables must have the gen2_ prefix  
+# shellcheck disable=SC2034
+
+# #####################################################################################
+# partitions where gentoo will be installed
+# these partitions will be set by installation script when disk is selected by user
+# #####################################################################################
+gen2_boot_partition="/dev/sda1"
+gen2_swap_partition="/dev/sda2"
+gen2_root_partition="/dev/sda3"
+gen2_home_partition="/dev/sda4"
+
+# #####################################################################################
+# values below required to run the script
+# ##################################################################################### 
+
+# #####################################################################################
+# partition sizes
+# #####################################################################################
+gen2_boot_partition_size=500MiB
+gen2_swap_partition_size=34GiB
+gen2_root_partition_size=40GiB
+
+# #####################################################################################
+# processor 
+# #####################################################################################
+gen2_processor_model=znver3
+
+# #####################################################################################
+# video card
+# #####################################################################################
+gen2_video_card="amdgpu radeonsi nvidia"
+
+# #####################################################################################
+# wifi
+# #####################################################################################
+gen2_wifi_card=realtek
+# gen2_wifi_card=intel
+# wifi_card=mediatek
+

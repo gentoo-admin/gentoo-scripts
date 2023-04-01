@@ -1,0 +1,577 @@
+#!/bin/bash
+# Script to connect random VPN locations using region and other filters
+# 
+# NOTE: disconnecting wifi using tray widget with active VPN connection
+# might cause empty list of wifi connections. Restarting NetworkManager and PC
+# does not help. Running this script on empty list shows error message 
+# "wpa_supplicant is not active", which is expected as this service not configured 
+# to run by default. Restarting this service does not help either.
+# This might be a bug and related to the hook implemented by ExpressVPN
+# to start/stop its daemon when NetworkManager service changes the status.
+#
+
+declare -a restricted_vpns=()
+declare -a vpn_locations=()
+declare -a region_locations=()
+
+# no restricted by default
+avoid_restricted=1
+
+ssid="SSID-HERE"
+
+ip_regex="[0-9]\{1,3\}.[0-9]\{1,3\}.[0-9]\{1,3\}.[0-9]\{1,3\}"
+
+function print_help() {
+    echo "$(basename "$0"): Script to restart vpn service"
+    echo "./$(basename "$0") --help, -h"
+    echo "  Display help"
+    echo "./$(basename "$0") --location, -l [ any | recommended ]"
+    echo "  Select all/recommended vpn locations"
+    echo "./$(basename "$0") --region, -r   [ eu | as | af | na | sa | me ]"
+    echo "  Specify region: Europe, Asia, Africa, North/South America, Middle East"
+    echo "./$(basename "$0") --avoid-restricted, -a"
+    echo "  Avoid restricted vpn locations"
+    echo ""
+    echo "Avialable predefined commands for vpn:"
+    echo "vpn-eu"
+    echo "vpn-us"
+    exit 0
+}
+
+function info() {
+    printf "%s [%s] %s  - %s\n" "$(date '+%F %T.%3N')" "$(basename "$0")" INFO "$1"
+}
+
+function warn() {
+    printf "%s [%s] %s  - %s\n" "$(date '+%F %T.%3N')" "$(basename "$0")" WARN "$1"
+}
+
+function error() {
+    printf "%s [%s] %s  - %s\n" "$(date '+%F %T.%3N')" "$(basename "$0")" ERROR "$1" >&2
+}
+
+function fatal_error() {
+    error "$1"
+    exit 1
+}
+
+function is_recommended() {
+    [ "$location_type" == "recommended" ] 
+}
+
+function is_any() {
+    [ "$location_type" == "any" ] 
+}
+
+function is_region_set() {
+    [[ "${#region_locations[@]}" -gt 0 ]] 
+}
+
+function select_vpn_location() {
+
+    local cmd
+
+    # expressvpn list recommended/all | 
+    # grep '^[a-z]\+[[:digit:]]\?[[:space:]]\+.*' | 
+    # grep -iEv "$restricted" | 
+    # grep -iE "$regions"
+    cmd="expressvpn list "
+    if is_recommended ; then
+        cmd="${cmd} recommended"
+    fi
+    if is_any ; then
+        cmd="${cmd} all"
+    fi
+
+    # match vpn entries from list:
+    # ALIAS COUNTRY                     LOCATION                       RECOMMENDED
+    # ----- ---------------             ------------------------------ -----------
+    # smart Smart Location              USA - Miami                    
+    # hk2   Hong Kong (HK)              Hong Kong - 2                  Y
+    # hk4                               Hong Kong - 4                  
+    # hk1                               Hong Kong - 1                  
+    # uswd  United States (US)          USA - Washington DC            Y
+    # usny                              USA - New York                 Y
+    # usla                              USA - Los Angeles              Y
+    cmd="${cmd} | grep '^[a-z]\+[[:digit:]]\?[[:space:]]\+[A-Z].*'"
+
+    if [ "${#restricted_vpns[@]}" -gt 0 ] ; then
+        local restricted
+        restricted="$(printf '|%s' "${restricted_vpns[@]}")"
+        cmd="${cmd} | grep -iEv '${restricted:1}'"
+    fi
+    if [ "${#region_locations[@]}" -gt 0 ] ; then
+        local regions
+        regions="$(printf '|%s' "${region_locations[@]}")"
+        cmd="${cmd} | grep -iE '${regions:1}'"
+    fi
+    IFS=$'\n'
+    while read -r line; do
+        vpn_locations+=("$line")
+    done < <(eval "$cmd")
+
+    if [ ${#vpn_locations[@]} -eq 0 ] ; then
+        fatal_error "No VPN locations available"
+    else
+        info "Found ${#vpn_locations[@]} VPN locations"
+    fi      
+}
+
+function get_current_vpn() {
+    IFS=$'\n'
+    local current_vpn
+    while read -r line; do
+    if [[ "$line" == *"Connected to"* ]] ; then
+        current_vpn=$(echo "$line" | cut -d' ' -f3-)
+        restricted_vpns+=("$current_vpn")
+        info "VPN status: connected to $current_vpn"
+        break
+    fi
+    done < <(expressvpn status 2>/dev/null)
+}
+
+# wait until network will be manually connected
+function connect_wlan_manual() {
+    if ! is_wlan_connected ; then
+        info "Connect to WLAN"
+        while true 
+        do
+            sleep 0.5
+            if is_wlan_connected ; then
+                break
+            fi
+        done
+    fi
+}
+
+# connect to wlan using nmcli
+function connect_wlan_auto() {
+    if ! is_wlan_connected ; then
+        local password
+        validate_ssid
+        check_ssid
+        password=$(nmcli --show-secrets -f 802-11-wireless-security.psk connection show "$ssid" | awk '{print $2}')
+        if [ -z "$password" ] ; then
+            fatal_error "Unable to retrieve password from network configuration"
+        fi
+        info "Connecting to $ssid"
+        if ! nmcli device wifi connect "$ssid" password "$password" 1>/dev/null ; then
+            fatal_error "Unable to connect to $ssid"
+        fi
+    fi
+}
+
+function validate_ssid() {
+    if [ -z "$ssid" ] ; then
+        fatal_error "Invalid SSID provided"
+    fi
+    if ! nmcli -f NAME connection show | sed 's/^[[:space:]]\+//;s/[[:space:]]\+$//' | grep -q "^${ssid}$" ; then
+        fatal_error "Connection profile not found: $ssid"
+    fi
+    if [[ ! $(pgrep "[w]pa_supplicant") ]]; then
+        fatal_error "wpa_supplicant is not running"
+    fi
+}
+
+# SSID must show up in device list
+function check_ssid() {
+    info "Initializing $ssid"
+    while true
+    do
+        sleep 1 
+        # 'nmcli -f SSID device wifi | head -25' does not change process time 
+        if nmcli -f SSID device wifi | grep "$ssid" | sed 's/^[[:space:]]\+//;s/[[:space:]]\+$//' | grep -q "^${ssid}$" ; then
+            break
+        fi
+    done
+}
+
+# daemon should start with network service
+function check_vpn_daemon() {
+    info "Checking VPN daemon"
+    local i=0
+    while true
+    do
+        sleep 0.5
+        if is_daemon_running ; then
+            break
+        fi
+        i=$((i+1))
+        # expressvpn daemon does not start 
+        if [[ "$i" -eq 30 ]]; then
+            fatal_error "Unable to start ExpressVPN daemon"
+        fi
+    done
+}
+
+function check_wlan_status() {
+    local i=0    
+    while true
+    do
+        sleep 0.5
+        if is_wlan_connected ; then
+            break
+        fi
+        i=$((i+1))
+        # unable to start network manager
+        if [[ "$i" -eq 20 ]]; then
+            fatal_error "Unable to connect to network"
+        fi
+    done
+}
+
+function disconnect_current_vpn() {
+    local i=0
+    expressvpn disconnect
+    info "Waiting for VPN daemon to stop"
+    while true
+    do 
+        sleep 0.5
+        if ! is_daemon_running ; then
+            break
+        fi
+        i=$((i+1))
+        if [[ "$i" -eq 20 ]]; then
+            info "VPN daemon still running, stopping service directly"
+            sudo /etc/init.d/expressvpn stop
+        fi
+        if [[ "$i" -eq 40 ]]; then
+            fatal_error "VPN daemon not stopped, restart all services manually"
+        fi        
+    done
+}
+
+function set_restrictions() {
+
+    # locations ignored in all cases
+    restricted_vpns+=("Africa")
+    restricted_vpns+=("Albania")
+    restricted_vpns+=("Belarus")
+    restricted_vpns+=("Bosnia")
+    restricted_vpns+=("Bulgaria")
+    restricted_vpns+=("Estonia")
+    restricted_vpns+=("Isle of Man")
+    restricted_vpns+=("Jersey")
+    restricted_vpns+=("Kazakhstan")
+    restricted_vpns+=("Kenya")
+    restricted_vpns+=("Kyrgyzstan")
+    restricted_vpns+=("Laos")
+    restricted_vpns+=("Latvia")
+    restricted_vpns+=("Lithuania")
+    restricted_vpns+=("Macedonia")
+    restricted_vpns+=("Mongolia")
+    restricted_vpns+=("Moldova")
+    restricted_vpns+=("Montenegro")
+    restricted_vpns+=("Myanmar")
+    restricted_vpns+=("Greece")
+    restricted_vpns+=("Serbia")
+    restricted_vpns+=("Slovakia")
+
+    if [ "$avoid_restricted" -eq 0 ] ; then
+        
+        # countires where content is restricted
+        restricted_vpns+=("Australia")
+        restricted_vpns+=("Belgium")
+        restricted_vpns+=("Canada")
+        restricted_vpns+=("Czech")
+        restricted_vpns+=("Denmark")
+        restricted_vpns+=("Germany")
+        restricted_vpns+=("Hong Kong")
+        restricted_vpns+=("Iceland")
+        restricted_vpns+=("Liechtenstein")
+        restricted_vpns+=("Luxembourg")
+        restricted_vpns+=("Malta")
+        restricted_vpns+=("Netherlands")
+        restricted_vpns+=("New Zealand")
+        restricted_vpns+=("Russia")
+        restricted_vpns+=("Switzerland")
+        restricted_vpns+=("Ukraine")
+        restricted_vpns+=("United Kingdom")
+        restricted_vpns+=("UK")
+        restricted_vpns+=("USA")
+
+    fi
+
+}
+
+function set_vpn_region() {
+
+    if [ -z "$region" ] ; then
+        return
+    fi
+
+    if [[ "$region" =~ [Ee][Uu] ]] ; then
+        region_locations+=("Germany")
+        region_locations+=("UK")
+        region_locations+=("Netherlands")
+        region_locations+=("Spain")
+        region_locations+=("Switzerland")
+        region_locations+=("France")
+        region_locations+=("Belgium")
+        region_locations+=("Italy")
+        region_locations+=("Romania")
+        region_locations+=("Ireland")
+        region_locations+=("Norway")
+        region_locations+=("Denmark")
+        region_locations+=("Finland")
+        region_locations+=("Greece")
+        region_locations+=("Portugal")
+        region_locations+=("Austria")
+        region_locations+=("Poland")
+        region_locations+=("Lithuania")
+        region_locations+=("Latvia")
+        region_locations+=("Estonia")
+        region_locations+=("Czech Republic")
+        region_locations+=("Bosnia")
+        region_locations+=("Herzegovina")
+        region_locations+=("Luxembourg")
+        region_locations+=("Hungary")
+        region_locations+=("Bulgaria")
+        region_locations+=("Malta")
+        region_locations+=("Liechtenstein")
+        region_locations+=("Cyprus")
+        region_locations+=("Albania")
+        region_locations+=("Croatia")
+        region_locations+=("Slovenia")
+        region_locations+=("Slovakia")
+        region_locations+=("Monaco")
+        region_locations+=("Macedonia")
+        region_locations+=("Moldova")        
+        region_locations+=("Serbia")        
+    elif [[ "$region" =~ [Nn][Aa] ]] ; then
+        region_locations+=("USA")
+        region_locations+=("Canada")
+        region_locations+=("Iceland")
+    elif [[ "$region" =~ [Ss][Aa] ]] ; then
+        region_locations+=("Mexico")
+        region_locations+=("Brazil")
+        region_locations+=("Panama")
+        region_locations+=("Chile")
+        region_locations+=("Argentina")
+        region_locations+=("Bolivia")
+        region_locations+=("Costa Rica")
+        region_locations+=("Colombia")
+        region_locations+=("Ecuador")
+        region_locations+=("Guatemala")
+        region_locations+=("Peru")
+        region_locations+=("Uruguay")
+    elif [[ "$region" =~ [Aa][Ss] ]] ; then
+        region_locations+=("Hong Kong")
+        region_locations+=("India")
+        region_locations+=("Singapore")
+        region_locations+=("Japan")
+        region_locations+=("Australia")
+        region_locations+=("Korea")
+        region_locations+=("Philippines")
+        region_locations+=("Malaysia")
+        region_locations+=("Sri Lanka")
+        region_locations+=("New Zealand")
+        region_locations+=("Taiwan")
+        region_locations+=("Indonesia")
+        region_locations+=("Vietnam")
+        region_locations+=("Macau")
+        region_locations+=("Cambodia")
+        region_locations+=("Mongolia")
+        region_locations+=("Laos")
+        region_locations+=("Myanmar")
+        region_locations+=("Kyrgyzstan")
+        region_locations+=("Uzbekistan")
+        region_locations+=("Bangladesh")
+        region_locations+=("Nepal")
+        region_locations+=("Bhutan")
+        region_locations+=("Kazakhstan")
+        region_locations+=("Thailand")
+    elif [[ "$region" =~ [Me][Ee] ]] ; then
+        region_locations+=("Brunei")
+        region_locations+=("Turkey")
+        region_locations+=("Israel")
+        region_locations+=("Pakistan")
+    elif [[ "$region" =~ [Aa][Ff] ]] ; then
+        region_locations+=("Africa")
+        region_locations+=("Egypt")
+        region_locations+=("Kenya")
+        region_locations+=("Algeria")
+    else 
+        fatal_error "Unknown region provided"
+    fi
+
+}
+
+
+function is_interface_up() {
+    local status
+    # cat: /sys/class/net/wlan0/carrier: Invalid argument
+    # cat: /sys/class/net/wlp3s0/carrier: Invalid argument
+    if [ -z "$1" ] || [ ! -L "/sys/class/net/${1}" ] || 
+       [ ! -f "/sys/class/net/${1}/carrier" ] ; then
+        return 1
+    fi
+    status=$(cat "/sys/class/net/${1}/carrier")
+    if [ $((status)) -eq 1 ] ; then
+        return 0
+    fi
+    return 1
+}
+
+function get_wlan_name() {
+    local interface
+    for i in $(find /sys/class/net -maxdepth 1 -mindepth 1 | sed 's/.*\///') 
+    do 
+        if [ -d "/sys/class/net/$i/wireless" ] ; then 
+            interface="$i";
+            break
+        fi 
+    done
+    echo "$interface"
+}
+
+function is_wlan_connected() {
+    local wlan 
+    wlan=$(get_wlan_name)
+    if ! is_interface_up "$wlan" ; then
+        return 1
+    fi
+    # method above is not reliable as can return active connection when 
+    # ip address not set. will check explicitly for assigned IP 
+    if ! ifconfig | grep -A7 "^${wlan}:" | grep -q "^[[:space:]]\+inet[[:space:]]\+$ip_regex" ; then
+        return 1
+    fi
+    return 0
+}
+
+function connect_wlan() {
+    /etc/init.d/NetworkManager status > /dev/null 2>&1
+    local status=$?
+    local count
+    if [ $status -eq 16 ] || [ $status -eq 4 ] ; then # inactive
+        # rescan if NetworkManager lost SSIDs
+        count=$(nmcli -t device wifi list | wc -l)
+        if [ "$count" -eq 0 ] ; then
+            if ! nmcli device wifi rescan ; then
+                info "Restarting network manager"
+                sudo /etc/init.d/NetworkManager restart
+            fi
+        fi
+    elif [ $status -eq 3 ] ; then # stopped
+        info "Starting network manager"
+        sudo /etc/init.d/NetworkManager start
+    fi
+    if [ $status -ne 0 ] ; then
+        connect_wlan_auto
+        check_wlan_status    
+    fi
+}
+
+function is_tun_connected() {
+    local interface 
+    interface=$(find /sys/class/net -maxdepth 1 -mindepth 1 | sed 's/.*\///' | grep tun)
+    is_interface_up "$interface"
+}
+
+function is_daemon_running() {
+    # /etc/init.d/expressvpn status > /dev/null 2>&1
+    [[ $(pgrep "[e]xpressvpnd") ]]
+}
+
+function is_expressvpn_connected() {
+    # 'expressvpn status' returns 0 when daemon is running
+    # will match connection output for key phrases
+    while read -r line; do
+        if [[ "$line" == *"Connected to"* ]] || [[ "$line" == *"Reconnecting"* ]] ; then
+            return 0
+        fi
+    done < <(expressvpn status 2>/dev/null)
+    return 1
+}
+
+function print_up() {
+    printf '\033[0;32m\u25B2\033[0m %s\n' "$1"
+}
+
+function print_down() {
+    printf '\033[0;31m\u25BC\033[0m %s\n' "$1"
+}
+
+function log_status() {
+    info "Status: "
+    printf "  %-20s" "wlan:"
+    if is_wlan_connected ; then print_up "up"; else print_down "down"; fi 
+    /etc/init.d/NetworkManager status > /dev/null 2>&1
+    local status=$?
+    printf "  %-20s" "service:" 
+    if [ "$status" -eq 0 ] ; then print_up "active [$status]"; else print_down "inactive [$status]"; fi
+    printf "  %-20s" "network:"
+    nmcli_status="$(nmcli --terse -f STATE general status)"
+    if [ "$nmcli_status" == "connected" ] ; then print_up "$nmcli_status" ; else print_down "$nmcli_status"; fi
+    printf "  %-20s" "VPN daemon:"
+    if is_daemon_running ; then print_up "running" ; else print_down "not running"; fi
+    printf "  %-20s" "VPN location:"
+    if is_expressvpn_connected ; then print_up "connected"; else print_down "disconnected"; fi
+    printf "  %-20s" "tun:"
+    if is_tun_connected ; then print_up "up"; else print_down "down"; fi
+}
+
+while [[ $# -gt 0 ]]
+do
+    arg="$1"
+    case $arg in
+        -h|--help)
+        print_help
+        shift
+        ;;
+        -l=*|--location=*)
+        location_type="${arg#*=}"
+        shift
+        ;;
+        -r=*|--region=*)
+        region="${arg#*=}"
+        shift
+        ;;
+        -a|--avoid-restricted)
+        avoid_restricted=0
+        shift
+        ;;
+        *) # unknown option
+        print_help
+        shift
+        ;;
+    esac
+done
+
+if ! is_any && ! is_recommended ; then
+    info "Invalid argument: $location_type"
+    print_help
+fi
+
+set_restrictions
+set_vpn_region
+
+log_status
+
+# restart vpn daemon if connecting to vpn location hungs
+if is_wlan_connected && is_daemon_running ; then
+    get_current_vpn
+    disconnect_current_vpn
+fi
+
+connect_wlan
+
+if ! is_daemon_running ; then
+    sudo /etc/init.d/expressvpn start
+    check_vpn_daemon
+fi
+
+select_vpn_location
+
+info "Selecting random VPN location"
+count=${#vpn_locations[@]}
+rand=$((RANDOM%count))
+vpn_location="${vpn_locations[$rand]}"
+alias=$(echo "$vpn_location" | awk '{print $1}')
+
+expressvpn connect "$alias"
+
+if ! is_expressvpn_connected || ! is_tun_connected ; then
+    info "Failed to connect to a vpn location"
+    expressvpn diagnostics
+fi

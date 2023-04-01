@@ -1,0 +1,20 @@
+#!/bin/bash 
+# disable fast/secure boot on target pc
+# run ./minimal-cd.sh to repack Gentoo USB with installation scripts
+# boot from created USB
+
+# enable ssh
+passwd root
+# ./wpa-wifi-connect.sh
+rc-service sshd start && ifconfig
+# mount 2 hdd to store logs
+mkdir /mnt/sda1 && mount /dev/sda1 /mnt/sda1
+# install
+./openrc-kde.sh 2>&1 | tee -a /mnt/sda1/gentoo-install-$(date +%F).log
+umount /mnt/sda1 && rm -rf /mnt/sda1
+# reboot
+# ./fstab-fix.sh
+mkdir /mnt/sda1 && mount /dev/sda1 /mnt/sda1
+bash /install-scripts/openrc-kde-desktop.sh 2>&1 | tee -a /mnt/sda1/gentoo-install-[tab].log
+umount /mnt/sda1 && rm -rf /mnt/sda1
+rm -rf /install-scripts

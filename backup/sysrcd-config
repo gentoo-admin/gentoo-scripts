@@ -1,0 +1,30 @@
+#!/bin/bash
+
+source /etc/os-release
+if [ "$NAME" != "Arch Linux" ] ; then
+    echo "Not supported operating system."
+    exit 1
+fi
+
+# set black on white terminal colors
+terminal_config_file="/root/.config/xfce4/terminal/terminalrc"
+if [ -f "$terminal_config_file" ] ; then
+    sed -i 's/^\(ColorForeground=\).*/\1#000000/' $terminal_config_file
+    sed -i 's/^\(ColorBackground=\).*/\1#ffffff/' $terminal_config_file
+    grep -w "ColorCursor=" $terminal_config_file >> /dev/null
+    if [ $? -eq 0 ] ; then
+        sed -i '/ColorCursor=/d' $terminal_config_file
+    fi
+    grep -w "ColorPalette=" $terminal_config_file >> /dev/null
+    if [ $? -eq 0 ] ; then
+        sed -i '/ColorPalette=/d' $terminal_config_file
+    fi
+fi
+
+# set pm timeout to 60 minutes as files will not be saved to hd after 10 min of standart timeout
+pm_config_file="/root/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml"
+if [ -f "$pm_config_file" ] ; then
+    sed -i '/\(dpms\|blank\)-on-ac/s/value=\".*\"/value=\"60\"/' "$pm_config_file"
+fi
+
+# enable touch pad 
