@@ -1,4 +1,4 @@
-﻿README.md
+﻿
 
 Scripts that have been developed and used for backup/restore on various prod environments over the last years.
 

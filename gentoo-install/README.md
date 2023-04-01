@@ -1,4 +1,4 @@
-﻿README.md
+﻿
 
 Fully functional and automated script to install KDE Gentoo Linux on AMD-based systems, was successfully tested on various gaming PCs (Gigabyte, MinisForum etc.).  Install time depends on the processor speed and package setup, varied from 5 to 8 hours on testing machines (Ryzen 7/9 8 cores/16 threads) with the default KDE profile with full setup including user applicatons.
 
